@@ -538,6 +538,40 @@ describe('mergeWithBundled presets 兜底', () => {
     );
   });
 
+  it('远端旧预设缺连接级标头时从 bundled 补齐（#11326）', () => {
+    const bundledCopilot = BUNDLED_CATALOG.presets!.find((preset) => preset.id === 'github-copilot')!;
+    const bundledHeaders = bundledCopilot.runtimes.pi!.headers!;
+    expect(Object.keys(bundledHeaders).length).toBeGreaterThan(0);
+    // 模拟旧远端目录：同 id 预设但没有 headers 字段（该字段是后加的）。
+    const staleRemote = {
+      ...bundledCopilot,
+      runtimes: {
+        ...bundledCopilot.runtimes,
+        pi: (({ headers: _headers, ...rest }) => rest)(bundledCopilot.runtimes.pi!),
+      },
+    };
+    const merged = mergeWithBundled(minimalCatalog({ presets: [staleRemote] }));
+    expect(merged.presets?.find((preset) => preset.id === 'github-copilot')?.runtimes.pi?.headers)
+      .toEqual(bundledHeaders);
+  });
+
+  it('远端同 id 预设改到自建网关时不继承 bundled 的连接级标头（#11326）', () => {
+    const bundledCopilot = BUNDLED_CATALOG.presets!.find((preset) => preset.id === 'github-copilot')!;
+    const relay = {
+      ...bundledCopilot,
+      runtimes: {
+        ...bundledCopilot.runtimes,
+        pi: {
+          ...(({ headers: _headers, ...rest }) => rest)(bundledCopilot.runtimes.pi!),
+          baseUrl: 'https://my-gateway.example.com/v1',
+        },
+      },
+    };
+    const merged = mergeWithBundled(minimalCatalog({ presets: [relay] }));
+    expect(merged.presets?.find((preset) => preset.id === 'github-copilot')?.runtimes.pi?.headers)
+      .toBeUndefined();
+  });
+
   it('远端没带 presets → 回落 bundled 的', () => {
     const merged = mergeWithBundled(minimalCatalog());
     expect(merged.presets).toEqual(BUNDLED_CATALOG.presets);
@@ -1183,15 +1217,15 @@ describe('官方渠道预设契约', () => {
   });
 
   it.each(['zhipu-coding-plan-cn', 'zai-coding-plan-global'])(
-    '%s 的 Coding Plan 按引擎推荐 GLM-5.4 和已有的 5.3 系列',
+    '%s 只推荐官方支持的 GLM-5.3 / GLM-5.3-Flash（5.2、5.1 已路由到 5.3）',
     (id) => {
       const recommended = (agent: 'claude-code' | 'codex' | 'pi') =>
         preset(id)?.runtimes[agent]?.models
           .filter((model) => model.defaultEnabled !== false)
           .map((model) => model.id);
-      expect(recommended('claude-code')).toEqual(['glm-5.4[1m]', 'glm-5.3[1m]', 'glm-5.3-flash[1m]']);
-      expect(recommended('codex')).toEqual(['glm-5.4', 'glm-5.3', 'glm-5.3-flash']);
-      expect(recommended('pi')).toEqual(['glm-5.4', 'glm-5.3', 'glm-5.3-flash']);
+      expect(recommended('claude-code')).toEqual(['glm-5.3[1m]', 'glm-5.3-flash[1m]']);
+      expect(recommended('codex')).toEqual(['glm-5.3', 'glm-5.3-flash']);
+      expect(recommended('pi')).toEqual(['glm-5.3', 'glm-5.3-flash']);
     },
   );
 

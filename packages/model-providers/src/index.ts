@@ -180,7 +180,6 @@ export {
   isModelDisabled,
   isModelDisabledWithUniqueLegacyBasename,
   isProviderDisabled,
-  isProviderHidden,
 } from "./disableOverrides.js";
 export type { ModelDisableOverrides } from "./disableOverrides.js";
 
@@ -300,6 +299,9 @@ export {
   normalizeVisionModelId,
 } from "./visionCapability.js";
 export type { VisionCapability } from "./visionCapability.js";
+
+export { copilotConnectionHeaders, copilotConnectionHeadersFor, isOfficialCopilotEndpoint } from "./piProviderPresets.js";
+export { connectionDefaultHeaders, withConnectionDefaultHeaders } from "./user-provider.js";
 
 export {
   parseLocalModelCatalog,

@@ -437,6 +437,8 @@ function toRouting(
  * 按 `runtimes` 里**已配置的 runtime** 生成各 agent 的 routing / models（每 runtime 独立 baseUrl /
  * 模型 / headers）；空 runtimes 产出空 Provider（不出现在任何 agent 列表，无害）。
  */
+import { copilotConnectionHeadersFor } from './piProviderPresets.js';
+
 export interface BuildUserProviderOptions {
   modelRegistry?: ModelRegistry | null;
   presets?: readonly import("./types.js").ProviderPreset[];
@@ -445,7 +447,39 @@ export interface BuildUserProviderOptions {
     agent: AgentKind,
     model: ProviderRuntimeModelConfig,
     routing: RoutingDescriptor,
-  ) => (ModelMetadata & Pick<CatalogModel, 'supportsUltrafastMode'>) | undefined;
+  ) => ModelMetadata | undefined;
+}
+
+/**
+ * 连接级默认请求头。预设里的「IDE 身份头」这类连接级常量存在于此，取值来自静态目录。
+ * 新连接由 `presetConnectionRuntime` 落进持久化配置；存量连接没有，读取侧用
+ * `withConnectionDefaultHeaders` 补齐（#11326）。
+ */
+export function connectionDefaultHeaders(
+  presetId: string | undefined,
+  baseUrl?: string,
+): Record<string, string> | undefined {
+  return presetId === 'github-copilot' ? copilotConnectionHeadersFor(baseUrl) : undefined;
+}
+
+/**
+ * 存量自定义供应商的连接级默认头补齐：只补缺省，`rt.headers` 已有值的不覆盖。
+ * 纯函数，不写库 —— 调用方在读取路径上用它，避免把「预设后来补上的常量」当成用户编辑。
+ */
+export function withConnectionDefaultHeaders(config: CustomProviderConfig): CustomProviderConfig {
+  let changed = false;
+  const runtimes = Object.fromEntries(
+    Object.entries(config.runtimes).map(([agent, rt]) => {
+      // headersState='unknown' 表示密文头读不出来：这时补默认值会把状态从 unknown 翻成
+      // configured，等于用公开默认值掩盖一次真实的读取失败。保持原样让上层照常提示。
+      if (!rt || rt.headers || rt.headersState === 'unknown') return [agent, rt];
+      const defaults = connectionDefaultHeaders(rt.catalogPresetId, rt.baseUrl);
+      if (!defaults) return [agent, rt];
+      changed = true;
+      return [agent, { ...rt, headers: defaults }];
+    }),
+  ) as CustomProviderConfig['runtimes'];
+  return changed ? { ...config, runtimes } : config;
 }
 
 export function buildUserProvider(
@@ -478,21 +512,6 @@ export function buildUserProvider(
     const resolvedBaseUrl = presetBindings && presetRuntimeSource
       ? bindProviderEndpoint(presetRuntimeSource.baseUrl, presetBindings, rt.baseUrl)
       : rt.baseUrl;
-    routing[agent] = toRouting(
-      agent,
-      resolvedBaseUrl,
-      rt.requestPath,
-      rt.headers,
-      rt.headersState,
-      strategy,
-      presetRuntime?.modelsUrl ?? rt.modelsUrl,
-      rt.wireProtocol,
-      rt.piCatalogProviderId,
-      rt.supportsImageGeneration,
-    );
-    if (rt.catalogPresetId) routing[agent]!.catalogPresetId = rt.catalogPresetId;
-    if (rt.imageApi === "openai-images") routing[agent]!.imageApi = rt.imageApi;
-    if (isProviderVideoApi(rt.videoApi)) routing[agent]!.videoApi = rt.videoApi;
     const followsPreset =
       presetRuntime &&
       withoutTrailingSlashes(resolvedBaseUrl) ===
@@ -500,6 +519,29 @@ export function buildUserProvider(
       (rt.wireProtocol ?? defaultWireProtocol(agent)) ===
         (presetRuntime.wireProtocol ?? defaultWireProtocol(agent)) &&
       (rt.requestPath ?? "") === (presetRuntime.requestPath ?? "");
+    // 存量连接的 runtime 是「创建那一刻」的快照:预设后来补上的连接级默认标头(例如
+    // github-copilot 的 IDE 身份头,#11326)不会自己出现在已持久化的 config 里,新发现的
+    // 模型就继续裸奔发请求。这里对仍按预设原始端点/协议的 runtime 补齐;用户自己改过
+    // baseUrl / 协议 / requestPath 的连接不补,保持连接各自的语义。
+    // 只按「端点仍等于预设声明的上游」判定:IDE 身份头与协议无关(chat / responses 都要带),
+    // 用户改过协议但没换端点的连接同样需要它;换了 baseUrl 的连接视为自定义上游,不补。
+    const pointsAtPresetUpstream = presetRuntime !== undefined
+      && withoutTrailingSlashes(resolvedBaseUrl) === withoutTrailingSlashes(presetRuntime.baseUrl);
+    const effectiveHeaders = rt.headers ?? (pointsAtPresetUpstream ? presetRuntime?.headers : undefined);
+    routing[agent] = toRouting(
+      agent,
+      resolvedBaseUrl,
+      rt.requestPath,
+      effectiveHeaders,
+      rt.headersState,
+      strategy,
+      presetRuntime?.modelsUrl ?? rt.modelsUrl,
+      rt.wireProtocol,
+      rt.piCatalogProviderId,
+      rt.supportsImageGeneration,
+    );
+    if (rt.imageApi === "openai-images") routing[agent]!.imageApi = rt.imageApi;
+    if (isProviderVideoApi(rt.videoApi)) routing[agent]!.videoApi = rt.videoApi;
     if (followsPreset && preset && rt.models.every(model => !model.route?.baseUrl ||
         withoutTrailingSlashes(model.route.baseUrl) === withoutTrailingSlashes(resolvedBaseUrl))) {
       routing[agent]!.usagePresetId = preset.id;
@@ -630,18 +672,8 @@ export function buildUserProvider(
         // Reused adapter data is a fallback, not a configured route default.
         defaultEffort: m.discoveredMetadata?.defaultEffort,
       }) : undefined;
-      // Pi's language-model catalog describes text execution. A realtime session
-      // uses the model's published audio capabilities on its separate voice endpoint.
-      const baseDefaults = (imported || catalogDefaults)
-        ? findBaseModel(options.modelRegistry ?? BUNDLED_CATALOG.modelRegistry, m.id)?.defaults
-        : undefined;
       const defaults = imported || catalogDefaults || presetDefaults
-        ? mergeModelMetadata(
-            imported && !imported.inheritedFrom ? providerModelMetadata(imported) : exactRelayDefaults,
-            catalogDefaults,
-            baseDefaults?.mode === 'realtime' ? { modalities: baseDefaults.modalities } : undefined,
-            presetDefaults,
-          )
+        ? mergeModelMetadata(imported && !imported.inheritedFrom ? providerModelMetadata(imported) : exactRelayDefaults, catalogDefaults, presetDefaults)
         : undefined;
       // A verified catalog identity can reuse the manufacturer's declaration.
       // Execution protocols and prices still belong to this exact connection.
@@ -652,7 +684,6 @@ export function buildUserProvider(
         return routeNativeApi !== undefined ? routeNativeApi
           : resolveCatalogModelNativeApi(source, baseModel?.id ?? m.id, projected.mode);
       };
-      const liveMetadata = options.getDiscoveredModelMetadata?.(agent, m, routing[agent]!);
       const projected = toCatalogModel(
         m,
         m.selectedInterface?.providerId ?? (followsPreset && sameRoute ? preset!.id : config.id),
@@ -661,7 +692,7 @@ export function buildUserProvider(
         defaults,
         nativeCodex ? 'openai' : undefined,
         generationDefaults,
-        liveMetadata,
+        options.getDiscoveredModelMetadata?.(agent, m, routing[agent]!),
       );
       const currentDeclaration = resolveDeclaration(registry);
       // Apply current Server identity after capability projection, including an
@@ -685,13 +716,10 @@ export function buildUserProvider(
         ...(m.interfaceUnavailable ? { interfaceUnavailable: true, availableInterfaces: m.availableInterfaces } : {}),
         ...(m.selectedInterface ? { selectedInterface: { ...m.selectedInterface, defaults: catalogModelMetadata(projected) }, availableInterfaces: m.availableInterfaces,
           ...(m.selectedInterface.nativeApis !== undefined ? { nativeApis: m.selectedInterface.nativeApis } : {}) } : {}),
-        // Account discovery stays bound to its native Codex account. For API
-        // connections, only the host's exact-route capability can enable the tier.
-        ...(agent === 'codex' && nativeCodex
-          ? { supportsUltrafastMode: storedModel.supportsUltrafastMode === true }
-          : agent === 'codex' && liveMetadata?.supportsUltrafastMode !== undefined
-            ? { supportsUltrafastMode: projected.supportsFastMode === true && liveMetadata.supportsUltrafastMode }
-            : {}),
+        // Only this native account's latest discovery grants Ultrafast. Public
+        // defaults, same-name API connections and other engines cannot inherit it.
+        ...(nativeCodex && agent === 'codex'
+          ? { supportsUltrafastMode: storedModel.supportsUltrafastMode === true } : {}),
         ...(nativeApi !== undefined ? { nativeApi } : {}),
         // Projection is not a user edit. Save only the original configuration.
         userModelConfig: structuredClone(storedModel),

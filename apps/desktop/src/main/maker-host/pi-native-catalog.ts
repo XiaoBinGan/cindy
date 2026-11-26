@@ -1,6 +1,6 @@
 /** Pure Pi catalog projection shared by the desktop and headless launchers.
  * Keep protocol, endpoint, model limits and per-provider credential isolation together. */
-import { providerPresetModelRecord, providerModelAdapterId, providerBaseUrlForApi } from '@cindy/model-providers';
+import { providerPresetModelRecord, providerModelAdapterId, providerBaseUrlForApi, copilotConnectionHeadersFor, isOfficialCopilotEndpoint } from '@cindy/model-providers';
 import type { PiNativeApi, PiNativeModelSpec, PiNativeProviderSpec, PiNativeProvidersResult } from '@cindy/maker-core';
 import { PI_REASONING_EFFORTS, resolvePiModelRoute, runtimeCustomProviderId } from '@cindy/model-providers';
 import { providerCatalogForPi, providerModelRecord, providerModelGenerationRecord } from '@cindy/model-providers';
@@ -381,10 +381,22 @@ export function buildPiNativeProvidersFromConfigs(
             }),
           )
         : undefined;
+    /**
+     * 连接级身份默认头（例如 github-copilot 的 IDE 身份头）不是凭据：它只是把请求标识成
+     * 「来自这个应用」，没有它照样能用真 key 调通，只有它却没有 key 时也调不通。
+     * 所以 `!key && !headers` 这条判据必须把这类头排除，否则凭据被删/safeStorage 失败后
+     * 模型会被误判为可用（#11326）。
+     */
+    const headersAreIdentityDefaults =
+      headers !== undefined
+      && isOfficialCopilotEndpoint(rt.baseUrl ?? '')
+      && Object.keys(copilotConnectionHeadersFor(rt.baseUrl ?? '')).length > 0
+      && Object.entries(rt.headers ?? {}).every(([name, value]) =>
+        copilotConnectionHeadersFor(rt.baseUrl ?? '')[name] === value);
     let apiKeyEnvVar: string | undefined;
     if (authMethod === 'apiKey') {
       const key = readKey(cfg.id, 'pi');
-      if (!key && !headers) {
+      if (!key && (!headers || headersAreIdentityDefaults)) {
         onSkip?.(cfg.id, 'apiKey provider missing pi key and custom headers');
         continue;
       }
